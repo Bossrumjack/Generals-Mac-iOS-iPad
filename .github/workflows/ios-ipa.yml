@@ -1,0 +1,81 @@
+name: iOS IPA (unsigned)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 350
+    env:
+      VCPKG_ROOT: ${{ github.workspace }}/vcpkg-root
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Init DXVK submodule
+        run: git submodule update --init references/fbraz3-dxvk
+
+      - name: Install build tools
+        run: brew install ninja meson xcodegen pkgconf
+
+      - name: Cache vcpkg binary archives
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/vcpkg/archives
+          key: vcpkg-ios-${{ hashFiles('vcpkg.json', 'vcpkg-lock.json') }}
+          restore-keys: vcpkg-ios-
+
+      - name: Bootstrap vcpkg
+        run: |
+          git clone --depth 1 https://github.com/microsoft/vcpkg "$VCPKG_ROOT" || true
+          # manifest baseline needs full history
+          git -C "$VCPKG_ROOT" fetch --unshallow
+          "$VCPKG_ROOT/bootstrap-vcpkg.sh" -disableMetrics
+
+      - name: Install Vulkan SDK (with iOS component)
+        run: |
+          set -x
+          curl -fL -o vulkan-sdk.dmg "https://sdk.lunarg.com/sdk/download/latest/mac/vulkan-sdk.dmg" \
+            || curl -fL -o vulkan-sdk.dmg "https://sdk.lunarg.com/sdk/download/latest/mac/vulkan_sdk.dmg"
+          hdiutil attach vulkan-sdk.dmg -mountpoint /Volumes/vulkansdk -nobrowse
+          INSTALLER="$(ls -d /Volumes/vulkansdk/InstallVulkan*.app/Contents/MacOS/InstallVulkan* | head -1)"
+          sudo "$INSTALLER" --root "$HOME/vulkansdk" --accept-licenses --default-answer \
+            --confirm-command install com.lunarg.vulkan.ios
+          echo "VULKAN_SDK=$HOME/vulkansdk/macOS" >> "$GITHUB_ENV"
+          ls -la "$HOME/vulkansdk/macOS/lib/" || true
+          ls -la "$HOME/vulkansdk/macOS/lib/MoltenVK.xcframework/ios-arm64/" \
+            || { echo "::error::iOS MoltenVK static lib missing — check installer component name"; ls -laR "$HOME/vulkansdk" | head -100; exit 1; }
+
+      - name: Fetch MoltenVK dynamic framework (iOS)
+        run: ./scripts/build/ios/fetch-moltenvk.sh
+
+      - name: Stage fonts
+        run: ./scripts/build/ios/stage-fonts.sh
+
+      - name: Configure (ios-vulkan preset)
+        run: cmake --preset ios-vulkan
+
+      - name: Build engine (z_generals)
+        run: cmake --build build/ios-vulkan --target z_generals
+
+      - name: Package unsigned IPA
+        run: bash ./scripts/build/ios/package-ios-unsigned.sh
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GeneralsXZH-unsigned-ipa
+          path: build/ios-package/GeneralsXZH-unsigned.ipa
+          retention-days: 14
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            build/ios-vulkan/CMakeCache.txt
+            build/ios-vulkan/CMakeFiles/CMakeError.log
+            build/ios-vulkan/CMakeFiles/CMakeConfigureLog.yaml
+            build/ios-vulkan/vcpkg-manifest-install.log
+          if-no-files-found: ignore
