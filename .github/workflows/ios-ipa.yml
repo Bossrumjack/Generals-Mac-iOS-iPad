@@ -13,7 +13,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Init DXVK submodule
-        run: git submodule update --init references/fbraz3-dxvk
+        run: git submodule update --init --recursive references/fbraz3-dxvk
 
       - name: Install build tools
         run: brew install ninja meson xcodegen pkgconf
