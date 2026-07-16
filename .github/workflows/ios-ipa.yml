@@ -16,7 +16,7 @@ jobs:
         run: git submodule update --init --recursive references/fbraz3-dxvk
 
       - name: Install build tools
-        run: brew install ninja meson xcodegen pkgconf
+        run: brew install ninja meson xcodegen pkgconf glslang
 
       - name: Cache vcpkg binary archives
         uses: actions/cache@v4
