@@ -111,6 +111,7 @@ static D3DPRESENT_PARAMETERS _PresentParameters;
 // GeneralsX @feature xxorza 15/04/2026 Unified pillarbox for fullscreen and windowed
 DX8Wrapper::DisplaySizeFunc DX8Wrapper::s_getNativeDisplaySize = nullptr;
 DX8Wrapper::DisplaySizeFunc DX8Wrapper::s_getWindowSize = nullptr;
+DX8Wrapper::SafeAreaFunc DX8Wrapper::s_getSafeArea = nullptr;
 bool DX8Wrapper::s_pillarboxEnabled = false;
 bool DX8Wrapper::s_pillarboxActive = false;
 int DX8Wrapper::s_bbW = 0;
@@ -130,6 +131,11 @@ void DX8Wrapper::Set_Display_Size_Provider(DisplaySizeFunc nativeSize, DisplaySi
 {
 	s_getNativeDisplaySize = nativeSize;
 	s_getWindowSize = windowSize;
+}
+
+void DX8Wrapper::Set_Safe_Area_Provider(SafeAreaFunc fn)
+{
+	s_getSafeArea = fn;
 }
 
 bool DX8Wrapper::GetNativeDisplaySize(int& outW, int& outH, float& outDensity)
@@ -204,6 +210,33 @@ bool DX8Wrapper::Pillarbox_Setup(int gameW, int gameH)
 		s_dstW = bbW; s_dstH = (int)(bbW / gameAspect);
 		s_dstX = 0; s_dstY = (bbH - s_dstH) / 2;
 	}
+
+	// Safe-area inset: clip the blit rect to the region free of the notch, rounded
+	// corners and home indicator, so the whole game image (HUD included) lands
+	// inside the usable screen. The offscreen texture is simply scaled into the
+	// smaller rect; insets are a few percent so any aspect change is imperceptible.
+	// No-op when there are no insets (returns all-zero on most iPads / all desktop).
+	float saLeft, saTop, saRight, saBottom;
+	if (s_getSafeArea && s_getSafeArea(saLeft, saTop, saRight, saBottom)) {
+		const int sx0 = (int)(saLeft   * (float)bbW);
+		const int sy0 = (int)(saTop    * (float)bbH);
+		const int sx1 = bbW - (int)(saRight  * (float)bbW);
+		const int sy1 = bbH - (int)(saBottom * (float)bbH);
+
+		int nx0 = s_dstX > sx0 ? s_dstX : sx0;
+		int ny0 = s_dstY > sy0 ? s_dstY : sy0;
+		int nx1 = (s_dstX + s_dstW) < sx1 ? (s_dstX + s_dstW) : sx1;
+		int ny1 = (s_dstY + s_dstH) < sy1 ? (s_dstY + s_dstH) : sy1;
+
+		// Only apply a sane, non-degenerate intersection.
+		if (nx1 - nx0 > bbW / 2 && ny1 - ny0 > bbH / 2) {
+			s_dstX = nx0; s_dstW = nx1 - nx0;
+			s_dstY = ny0; s_dstH = ny1 - ny0;
+			fprintf(stderr, "INFO: Pillarbox safe-area inset -> dst=%d,%d %dx%d (insets L%.3f T%.3f R%.3f B%.3f)\n",
+				s_dstX, s_dstY, s_dstW, s_dstH, saLeft, saTop, saRight, saBottom);
+		}
+	}
+
 	s_pillarboxEnabled = true;
 	fprintf(stderr, "INFO: Pillarbox: game=%dx%d, backbuffer=%dx%d, present=%ux%u, windowed=%d\n",
 		gameW,

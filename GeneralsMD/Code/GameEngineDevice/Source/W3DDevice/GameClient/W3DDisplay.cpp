@@ -534,6 +534,41 @@ static bool SDL3_GetWindowSizeInPixels(int& outW, int& outH, float& outDensity)
 	return true;
 }
 
+// Safe-area insets as fractions (0..1) of the window, so the pillarbox blit can
+// pull the whole game image (and thus the entire HUD) inside the notch, rounded
+// corners and home indicator. Unit-independent: works regardless of pixel
+// density. Returns false / all-zero on hardware without insets (most iPads,
+// every desktop), leaving rendering exactly as before.
+static bool SDL3_GetSafeAreaInsets(float& outLeft, float& outTop, float& outRight, float& outBottom)
+{
+	extern SDL_Window* TheSDL3Window;
+	outLeft = outTop = outRight = outBottom = 0.0f;
+	if (!TheSDL3Window) return false;
+
+	SDL_Rect safe;
+	if (!SDL_GetWindowSafeArea(TheSDL3Window, &safe)) return false;
+
+	int winW = 0, winH = 0;
+	SDL_GetWindowSize(TheSDL3Window, &winW, &winH);
+	if (winW <= 0 || winH <= 0) return false;
+
+	// Guard against a degenerate safe rect (some SDL backends report empty before
+	// the first layout); treat that as "no insets" rather than hiding everything.
+	if (safe.w <= 0 || safe.h <= 0) return false;
+
+	outLeft   = (float)safe.x / (float)winW;
+	outTop    = (float)safe.y / (float)winH;
+	outRight  = (float)(winW - (safe.x + safe.w)) / (float)winW;
+	outBottom = (float)(winH - (safe.y + safe.h)) / (float)winH;
+
+	if (outLeft < 0.0f) outLeft = 0.0f;
+	if (outTop < 0.0f) outTop = 0.0f;
+	if (outRight < 0.0f) outRight = 0.0f;
+	if (outBottom < 0.0f) outBottom = 0.0f;
+
+	return (outLeft + outTop + outRight + outBottom) > 0.0f;
+}
+
 // GeneralsX @bugfix GitHub Copilot 28/04/2026 Ensure SDL3 fullscreen transition actually lands in native fullscreen and foreground.
 static void SDL3_EnsureNativeFullscreen(SDL_Window* window)
 {
@@ -927,6 +962,7 @@ void W3DDisplay::init()
 		// Register SDL3 display size providers for pillarbox before device init
 #ifdef SAGE_USE_SDL3
 		DX8Wrapper::Set_Display_Size_Provider(SDL3_GetNativeDisplaySize, SDL3_GetWindowSizeInPixels);
+		DX8Wrapper::Set_Safe_Area_Provider(SDL3_GetSafeAreaInsets);
 #endif
 
 		// GeneralsX @bugfix felipebraz 16/02/2026 Add detailed WW3D init logging

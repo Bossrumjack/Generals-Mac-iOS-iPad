@@ -514,6 +514,10 @@ public:
 	// Platform display size provider — set by SDL3 layer at init
 	typedef bool (*DisplaySizeFunc)(int& outW, int& outH, float& outDensity);
 	static void					Set_Display_Size_Provider(DisplaySizeFunc nativeSize, DisplaySizeFunc windowSize);
+	// Safe-area insets as window fractions (0..1). Pillarbox shrinks its blit rect
+	// by these so the HUD clears the notch/rounded corners/home indicator.
+	typedef bool (*SafeAreaFunc)(float& outLeft, float& outTop, float& outRight, float& outBottom);
+	static void					Set_Safe_Area_Provider(SafeAreaFunc fn);
 	static bool					GetNativeDisplaySize(int& outW, int& outH, float& outDensity);
 	static bool					GetWindowSize(int& outW, int& outH, float& outDensity);
 
@@ -737,6 +741,7 @@ protected:
 	// Display size providers (set by SDL3 layer, called by pillarbox)
 	static DisplaySizeFunc				s_getNativeDisplaySize;
 	static DisplaySizeFunc				s_getWindowSize;
+	static SafeAreaFunc					s_getSafeArea;
 
 	// Pillarbox state
 	static bool								s_pillarboxEnabled;
