@@ -40,7 +40,7 @@ jobs:
           file vulkan-sdk.bin
           if file vulkan-sdk.bin | grep -qi 'zip'; then
             unzip -q vulkan-sdk.bin -d vulkansdk-inst
-            INSTALLER="$(find "$PWD/vulkansdk-inst" -type f -path '*InstallVulkan*.app/Contents/MacOS/InstallVulkan*' | head -1)"
+            INSTALLER="$(find "$PWD/vulkansdk-inst" -type f -path '*.app/Contents/MacOS/*' | head -1)"
             chmod +x "$INSTALLER"
           else
             hdiutil attach vulkan-sdk.bin -mountpoint /Volumes/vulkansdk -nobrowse
