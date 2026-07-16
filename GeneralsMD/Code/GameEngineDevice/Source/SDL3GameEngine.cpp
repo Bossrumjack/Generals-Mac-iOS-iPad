@@ -38,6 +38,7 @@
 #include "GameClient/GameWindowManager.h"
 #include "GameClient/Gadget.h"
 #include "GameClient/TouchControls.h"
+#include "GameClient/Display.h"
 #include "W3DDevice/GameLogic/W3DGameLogic.h"
 #include "W3DDevice/GameClient/W3DGameClient.h"
 #include "W3DDevice/Common/W3DModuleFactory.h"
@@ -133,10 +134,13 @@ static bool SDLCALL iosLifecycleWatcher(void *userdata, SDL_Event *event)
 //   1 finger long-press   -> right button click (deselect), if finger stays put
 //   2 finger drag         -> right-button drag at the centroid (camera scroll)
 //   2 finger pinch        -> mouse wheel (camera zoom)
-//   1 finger in left pad  -> analog camera scroll stick (see PAD_* below): the
-//                            touch anchors an RMB scroll, so dragging away from
-//                            the landing point pans the map in that direction,
-//                            faster the farther the finger travels.
+//   1 finger on joystick  -> analog camera scroll stick: the touch anchors an
+//                            RMB scroll, so dragging away pans the map, faster
+//                            the farther the finger travels. The pad is a visible
+//                            overlay (TouchControls); presses are matched against
+//                            it in game-internal coords so it stays aligned under
+//                            the pillarbox/safe-area blit.
+//   1 finger on ALLE btn  -> select all units on screen.
 // ---------------------------------------------------------------------------
 namespace {
 
@@ -147,8 +151,8 @@ struct TouchState {
 		DRAGGING,    // finger1 drag in progress, LMB held
 		LONGPRESSED, // long-press fired (RMB click sent), swallow until lift
 		PAN,         // two-finger camera pan, RMB held
-		JOYSTICK,    // single finger in the left scroll pad, RMB held (camera stick)
-		TEAMBAR      // single finger held on a top team button (tap/long-press)
+		JOYSTICK,    // single finger on the joystick pad, RMB held (camera stick)
+		BUTTON       // single finger held on an overlay button (fires on lift)
 	};
 
 	Phase phase = IDLE;
@@ -160,7 +164,7 @@ struct TouchState {
 	float pinchDist = 0.0f;             // finger distance at last wheel step
 	Uint64 downTicks = 0;
 	float f1x = 0.0f, f1y = 0.0f, f2x = 0.0f, f2y = 0.0f; // normalized per finger
-	int teamButton = -1;                // team bar button under finger1 (TEAMBAR)
+	int overlayButton = -1;             // overlay button under finger1 (BUTTON phase)
 };
 
 TouchState s_touch;
@@ -169,13 +173,34 @@ const Uint64 LONG_PRESS_MS = 600;
 const float PINCH_STEP_RATIO = 0.06f;  // 6% distance change per wheel tick
 const float TAP_DEAD_ZONE_PX = 8.0f;   // jitter below this keeps a tap a tap
 
-// Left-edge camera scroll pad, in normalized window coords (0..1). A single
-// finger that lands inside this zone becomes an analog camera stick instead of
-// a select/tap. Kept clear of the bottom-left radar (roughly y > 0.72) and the
-// very top edge so it never fights the HUD or the notch/status area.
-const float PAD_X_MAX = 0.16f;   // left 16% of the width
-const float PAD_Y_MIN = 0.12f;
-const float PAD_Y_MAX = 0.70f;
+// Convert a normalized touch point (SDL tfinger.x/y) into TheDisplay's
+// game-internal pixel space, mirroring SDL3Mouse::scaleMouseCoordinates so the
+// overlay hit-tests land exactly under the pillarbox/safe-area blit — the same
+// place the buttons are drawn. Without this, touches and visuals drift apart.
+void touchToGameCoords(SDL_Window *window, float nx, float ny, int &gx, int &gy)
+{
+	gx = gy = 0;
+	if (!TheDisplay) return;
+	int winW = 0, winH = 0;
+	SDL_GetWindowSize(window, &winW, &winH);
+	if (winW <= 0 || winH <= 0) return;
+
+	const int iw = (int)TheDisplay->getWidth();
+	const int ih = (int)TheDisplay->getHeight();
+	const float px = nx * (float)winW;
+	const float py = ny * (float)winH;
+
+	int vx, vy, vw, vh;
+	if (TheDisplay->getViewportRect(vx, vy, vw, vh) && vw > 0 && vh > 0) {
+		float cx = px - (float)vx; if (cx < 0) cx = 0; if (cx > (float)vw) cx = (float)vw;
+		float cy = py - (float)vy; if (cy < 0) cy = 0; if (cy > (float)vh) cy = (float)vh;
+		gx = (int)(cx * (float)iw / (float)vw);
+		gy = (int)(cy * (float)ih / (float)vh);
+	} else {
+		gx = (int)(px * (float)iw / (float)winW);
+		gy = (int)(py * (float)ih / (float)winH);
+	}
+}
 
 void sendSyntheticMouse(SDL3Mouse *mouse, SDL_Window *window, Uint32 type,
                         float x, float y, Uint8 button = 0, float wheelY = 0.0f)
@@ -237,38 +262,37 @@ void handleTouchEvent(SDL3Mouse *mouse, SDL_Window *window, const SDL_Event &eve
 	switch (event.type) {
 	case SDL_EVENT_FINGER_DOWN:
 		if (s_touch.phase == TouchState::IDLE) {
-			// Team (control-group) bar takes priority over everything else: a
-			// press on a top button never selects units or scrolls. Tap recalls
-			// the squad, long-press assigns the current selection (fired on lift).
-			const int teamBtn = TouchTeamBar_HitTest(event.tfinger.x, event.tfinger.y);
-			if (teamBtn >= 0) {
+			// Overlay controls take priority: match the touch in game-internal
+			// coords (so it lines up with the drawn pad/button under the blit).
+			int gx = 0, gy = 0;
+			touchToGameCoords(window, event.tfinger.x, event.tfinger.y, gx, gy);
+			const int overlay = TouchOverlay_HitTest(gx, gy);
+			if (overlay == 0) {
+				// Joystick pad: anchor an RMB scroll at the landing point; the
+				// engine's SCROLL_RMB pans along the (finger - anchor) vector,
+				// scaled by length, so farther = faster. Stock scroll physics free.
 				s_touch.finger1 = event.tfinger.fingerID;
-				s_touch.phase = TouchState::TEAMBAR;
-				s_touch.teamButton = teamBtn;
+				s_touch.phase = TouchState::JOYSTICK;
+				s_touch.downX = s_touch.lastX = px;
+				s_touch.downY = s_touch.lastY = py;
+				s_touch.f1x = event.tfinger.x;
+				s_touch.f1y = event.tfinger.y;
+				sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_MOTION, px, py);
+				sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_DOWN,
+				                   px, py, SDL_BUTTON_RIGHT);
+				TouchOverlay_SetThumb(TRUE, gx, gy);
+				break;
+			}
+			if (overlay == 1) {
+				// Select-all button: fire on a clean lift (tap), like the others.
+				s_touch.finger1 = event.tfinger.fingerID;
+				s_touch.phase = TouchState::BUTTON;
+				s_touch.overlayButton = overlay;
 				s_touch.downX = s_touch.lastX = px;
 				s_touch.downY = s_touch.lastY = py;
 				s_touch.downTicks = SDL_GetTicks();
 				break;
 			}
-		}
-		if (s_touch.phase == TouchState::IDLE &&
-		    event.tfinger.x < PAD_X_MAX &&
-		    event.tfinger.y > PAD_Y_MIN && event.tfinger.y < PAD_Y_MAX) {
-			// Left scroll pad: drive the camera like an analog stick. Anchor an
-			// RMB scroll at the landing point; the engine's SCROLL_RMB then pans
-			// along the (finger - anchor) vector, scaled by its length, so the
-			// farther the finger drags from here the faster the map glides. All
-			// the stock scroll physics (speed factor, edge clamp) come for free.
-			s_touch.finger1 = event.tfinger.fingerID;
-			s_touch.phase = TouchState::JOYSTICK;
-			s_touch.downX = s_touch.lastX = px;
-			s_touch.downY = s_touch.lastY = py;
-			s_touch.f1x = event.tfinger.x;
-			s_touch.f1y = event.tfinger.y;
-			sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_MOTION, px, py);
-			sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_DOWN,
-			                   px, py, SDL_BUTTON_RIGHT);
-			break;
 		}
 		if (s_touch.phase == TouchState::IDLE) {
 			// Defer all BUTTON output: a finger landing could become a tap, a
@@ -342,16 +366,21 @@ void handleTouchEvent(SDL3Mouse *mouse, SDL_Window *window, const SDL_Event &eve
 		}
 		else if (s_touch.phase == TouchState::JOYSTICK && event.tfinger.fingerID == s_touch.finger1) {
 			// RMB is held; feeding the current finger position updates the scroll
-			// vector's magnitude/direction. The finger may leave the pad zone once
+			// vector's magnitude/direction. The finger may leave the pad once
 			// engaged — only the initial landing has to be inside it.
 			sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_MOTION, px, py);
+			int gx = 0, gy = 0;
+			touchToGameCoords(window, event.tfinger.x, event.tfinger.y, gx, gy);
+			TouchOverlay_SetThumb(TRUE, gx, gy);
 		}
-		else if (s_touch.phase == TouchState::TEAMBAR && event.tfinger.fingerID == s_touch.finger1) {
-			// Sliding off the button cancels the press (no select/assign fires),
-			// so a stray touch that started on the bar can be dragged to nothing.
-			if (TouchTeamBar_HitTest(event.tfinger.x, event.tfinger.y) != s_touch.teamButton) {
+		else if (s_touch.phase == TouchState::BUTTON && event.tfinger.fingerID == s_touch.finger1) {
+			// Sliding off the button cancels it (nothing fires), so a stray touch
+			// that started on it can be dragged away to nothing.
+			int gx = 0, gy = 0;
+			touchToGameCoords(window, event.tfinger.x, event.tfinger.y, gx, gy);
+			if (TouchOverlay_HitTest(gx, gy) != s_touch.overlayButton) {
 				s_touch.phase = TouchState::IDLE;
-				s_touch.teamButton = -1;
+				s_touch.overlayButton = -1;
 			}
 		}
 		else if (s_touch.phase == TouchState::PAN) {
@@ -409,18 +438,14 @@ void handleTouchEvent(SDL3Mouse *mouse, SDL_Window *window, const SDL_Event &eve
 				// Release the held RMB; the engine stops scrolling next frame.
 				sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_UP,
 				                   px, py, SDL_BUTTON_RIGHT);
+				TouchOverlay_SetThumb(FALSE, 0, 0);
 				break;
-			case TouchState::TEAMBAR:
-				// Canceled touches never commit; a clean lift fires assign on a
-				// long hold, otherwise select — mirroring CTRL+num vs num.
-				if (event.type != SDL_EVENT_FINGER_CANCELED && s_touch.teamButton >= 0) {
-					if ((SDL_GetTicks() - s_touch.downTicks) >= LONG_PRESS_MS) {
-						TouchTeamBar_Assign(s_touch.teamButton);
-					} else {
-						TouchTeamBar_Select(s_touch.teamButton);
-					}
+			case TouchState::BUTTON:
+				// A clean lift still on the button fires it; canceled touches don't.
+				if (event.type != SDL_EVENT_FINGER_CANCELED && s_touch.overlayButton == 1) {
+					TouchOverlay_SelectAll();
 				}
-				s_touch.teamButton = -1;
+				s_touch.overlayButton = -1;
 				break;
 			default:
 				break;

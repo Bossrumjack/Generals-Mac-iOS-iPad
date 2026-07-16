@@ -3795,8 +3795,8 @@ void InGameUI::postWindowDraw()
 //-------------------------------------------------------------------------------------------------
 void InGameUI::postDraw()
 {
-	// iOS touch team (control-group) bar, drawn on top of the UI. No-op elsewhere.
-	TouchTeamBar_Draw();
+	// iOS touch overlay (joystick pad + select-all button). No-op elsewhere.
+	TouchOverlay_Draw();
 
 	// render our display strings for the messages if on
 	if( m_messagesOn )
@@ -6370,79 +6370,65 @@ void InGameUI::drawPlayerInfoList()
 	}
 }
 
+
 // ============================================================================
-// Touch team (control-group) bar — iOS
+// Touch control overlay — iOS
 //
-// A keyboard-less device cannot press CTRL+1 / 1 to manage hotkey squads, so we
-// draw a row of ten numbered buttons along the top-centre of the screen (clear
-// of the bottom-left radar, bottom command bar and top-right money/power HUD).
-// The SDL3 touch handler hit-tests presses here and calls Select (tap) or
-// Assign (long-press); both just inject the exact same GameMessages the number
-// keys would. All of this compiles to nothing on non-touch builds.
+// Draws a visible camera joystick pad (lower-left) and a "select all on screen"
+// button (top-left), and hit-tests them. Geometry is in TheDisplay game-internal
+// pixels so the overlay is drawn inside the pillarbox/safe-area blit and never
+// falls under the notch/Dynamic Island. The SDL3 touch handler converts touches
+// into this same space before hit-testing. All no-ops on non-touch builds.
 // ============================================================================
 #if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
-#define GX_TOUCH_TEAMBAR 1
+#define GX_TOUCH_OVERLAY 1
 #else
-#define GX_TOUCH_TEAMBAR 0
+#define GX_TOUCH_OVERLAY 0
 #endif
 
-#if GX_TOUCH_TEAMBAR
+#if GX_TOUCH_OVERLAY
 namespace {
 
-struct TouchTeamButton { Int x, y, w, h; };
+struct TouchRect { Int x, y, w, h; };
 
-// Compute the ten button rects in TheDisplay pixel space. Draw and hit-test
-// share this one function so the visible buttons and the touch targets can
-// never drift apart. Returns the count (0 if no display yet).
-static Int computeTouchTeamButtons(TouchTeamButton out[10])
+static Bool touchJoystickRect(TouchRect& r)
 {
-	if (TheDisplay == NULL)
-		return 0;
-
+	if (TheDisplay == NULL) return FALSE;
 	const Int sw = (Int)TheDisplay->getWidth();
 	const Int sh = (Int)TheDisplay->getHeight();
-	if (sw <= 0 || sh <= 0)
-		return 0;
+	if (sw <= 0 || sh <= 0) return FALSE;
 
-	Int bw = (Int)(sw * 0.045f);
-	if (bw < 24) bw = 24;
-	const Int gap = (Int)(bw * 0.20f);
-	const Int bh = (Int)(bw * 0.85f);
-	const Int total = 10 * bw + 9 * gap;
-	const Int startX = (sw - total) / 2;
-	const Int y = (Int)(sh * 0.015f) + 4;   // just below the top edge / notch margin
-
-	for (Int i = 0; i < 10; ++i)
-	{
-		out[i].x = startX + i * (bw + gap);
-		out[i].y = y;
-		out[i].w = bw;
-		out[i].h = bh;
-	}
-	return 10;
+	Int size = (Int)(sw * 0.15f);
+	if (size < 120) size = 120;
+	r.w = r.h = size;
+	r.x = (Int)(sw * 0.03f);
+	r.y = (Int)(sh * 0.52f);   // lower-left: below the Dynamic Island, above the radar
+	return TRUE;
 }
 
-} // anonymous namespace
-#endif // GX_TOUCH_TEAMBAR
-
-void TouchTeamBar_Draw(void)
+static Bool touchSelectAllRect(TouchRect& r)
 {
-#if GX_TOUCH_TEAMBAR
-	if (TheDisplay == NULL || TheInGameUI == NULL)
-		return;
-	// Only while actually commanding units in-game (postDraw already gates this,
-	// but stay defensive: no bar in menus/score screens).
-	if (TheInGameUI->isQuitMenuVisible())
-		return;
+	if (TheDisplay == NULL) return FALSE;
+	const Int sw = (Int)TheDisplay->getWidth();
+	const Int sh = (Int)TheDisplay->getHeight();
+	if (sw <= 0 || sh <= 0) return FALSE;
 
-	TouchTeamButton btn[10];
-	const Int count = computeTouchTeamButtons(btn);
-	if (count == 0)
-		return;
+	Int w = (Int)(sw * 0.13f);
+	if (w < 110) w = 110;
+	Int h = (Int)(sh * 0.075f);
+	if (h < 44) h = 44;
+	r.x = (Int)(sw * 0.02f);
+	r.y = (Int)(sh * 0.03f);   // top-left corner (safe area)
+	r.w = w; r.h = h;
+	return TRUE;
+}
 
-	// Cached digit strings + font, built once and reused each frame.
-	static DisplayString *s_digit[10] = { 0 };
-	static GameFont *s_font = NULL;
+static Bool s_thumbActive = FALSE;
+static Int s_thumbX = 0, s_thumbY = 0;
+
+static GameFont* touchOverlayFont()
+{
+	static GameFont* s_font = NULL;
 	if (s_font == NULL && TheWindowManager != NULL)
 	{
 		AsciiString fontName = "Arial";
@@ -6456,79 +6442,111 @@ void TouchTeamBar_Draw(void)
 		}
 		s_font = TheWindowManager->winFindFont(fontName, pointSize, bold);
 	}
+	return s_font;
+}
 
-	const UnsignedInt bgColor     = GameMakeColor(0, 0, 0, 120);
-	const UnsignedInt borderColor = GameMakeColor(255, 255, 255, 170);
-	const UnsignedInt textColor   = GameMakeColor(255, 255, 0, 255);
-	const UnsignedInt dropColor   = GameMakeColor(0, 0, 0, 255);
+} // anonymous namespace
+#endif // GX_TOUCH_OVERLAY
 
-	for (Int i = 0; i < count; ++i)
+void TouchOverlay_Draw(void)
+{
+#if GX_TOUCH_OVERLAY
+	if (TheDisplay == NULL || TheInGameUI == NULL)
+		return;
+	if (TheInGameUI->isQuitMenuVisible())
+		return;
+
+	const UnsignedInt padFill    = GameMakeColor(0, 0, 0, 90);
+	const UnsignedInt padBorder  = GameMakeColor(255, 255, 255, 130);
+	const UnsignedInt thumbFill  = GameMakeColor(255, 255, 0, 200);
+	const UnsignedInt btnFill    = GameMakeColor(0, 0, 0, 130);
+	const UnsignedInt btnBorder  = GameMakeColor(255, 255, 255, 170);
+	const UnsignedInt btnText    = GameMakeColor(255, 255, 0, 255);
+	const UnsignedInt dropColor  = GameMakeColor(0, 0, 0, 255);
+
+	// Joystick pad
+	TouchRect pad;
+	if (touchJoystickRect(pad))
 	{
-		TheDisplay->drawFillRect(btn[i].x, btn[i].y, btn[i].w, btn[i].h, bgColor);
-		TheDisplay->drawOpenRect(btn[i].x, btn[i].y, btn[i].w, btn[i].h, 1.0f, borderColor);
+		TheDisplay->drawFillRect(pad.x, pad.y, pad.w, pad.h, padFill);
+		TheDisplay->drawOpenRect(pad.x, pad.y, pad.w, pad.h, 2.0f, padBorder);
 
-		if (s_font != NULL && TheDisplayStringManager != NULL)
+		// Thumb: at the finger while active, else centered. Clamped inside the pad.
+		Int tx = pad.x + pad.w / 2;
+		Int ty = pad.y + pad.h / 2;
+		if (s_thumbActive)
 		{
-			if (s_digit[i] == NULL)
+			tx = s_thumbX; ty = s_thumbY;
+			if (tx < pad.x) tx = pad.x; if (tx > pad.x + pad.w) tx = pad.x + pad.w;
+			if (ty < pad.y) ty = pad.y; if (ty > pad.y + pad.h) ty = pad.y + pad.h;
+		}
+		const Int ts = pad.w / 5;
+		TheDisplay->drawFillRect(tx - ts / 2, ty - ts / 2, ts, ts, thumbFill);
+	}
+
+	// Select-all button
+	TouchRect btn;
+	if (touchSelectAllRect(btn))
+	{
+		TheDisplay->drawFillRect(btn.x, btn.y, btn.w, btn.h, btnFill);
+		TheDisplay->drawOpenRect(btn.x, btn.y, btn.w, btn.h, 2.0f, btnBorder);
+
+		GameFont* font = touchOverlayFont();
+		if (font != NULL && TheDisplayStringManager != NULL)
+		{
+			static DisplayString* s_label = NULL;
+			if (s_label == NULL)
 			{
-				s_digit[i] = TheDisplayStringManager->newDisplayString();
-				if (s_digit[i] != NULL)
+				s_label = TheDisplayStringManager->newDisplayString();
+				if (s_label != NULL)
 				{
-					UnicodeString label;
-					label.format(L"%d", i);
-					s_digit[i]->setFont(s_font);
-					s_digit[i]->setText(label);
+					s_label->setFont(font);
+					s_label->setText(UnicodeString(L"ALLE"));
 				}
 			}
-			if (s_digit[i] != NULL)
+			if (s_label != NULL)
 			{
-				const Int tw = s_digit[i]->getWidth();
-				const Int th = s_font->height;
-				const Int tx = btn[i].x + (btn[i].w - tw) / 2;
-				const Int ty = btn[i].y + (btn[i].h - th) / 2;
-				s_digit[i]->draw(tx, ty, textColor, dropColor);
+				const Int tw = s_label->getWidth();
+				const Int th = font->height;
+				s_label->draw(btn.x + (btn.w - tw) / 2, btn.y + (btn.h - th) / 2, btnText, dropColor);
 			}
 		}
 	}
-#endif // GX_TOUCH_TEAMBAR
+#endif // GX_TOUCH_OVERLAY
 }
 
-Int TouchTeamBar_HitTest(Real normX, Real normY)
+Int TouchOverlay_HitTest(Int gameX, Int gameY)
 {
-#if GX_TOUCH_TEAMBAR
-	if (TheDisplay == NULL)
-		return -1;
-	const Int sw = (Int)TheDisplay->getWidth();
-	const Int sh = (Int)TheDisplay->getHeight();
-	const Int px = (Int)(normX * (Real)sw);
-	const Int py = (Int)(normY * (Real)sh);
+#if GX_TOUCH_OVERLAY
+	TouchRect pad;
+	if (touchJoystickRect(pad) &&
+	    gameX >= pad.x && gameX < pad.x + pad.w &&
+	    gameY >= pad.y && gameY < pad.y + pad.h)
+		return 0;
 
-	TouchTeamButton btn[10];
-	const Int count = computeTouchTeamButtons(btn);
-	for (Int i = 0; i < count; ++i)
-	{
-		if (px >= btn[i].x && px < btn[i].x + btn[i].w &&
-		    py >= btn[i].y && py < btn[i].y + btn[i].h)
-			return i;
-	}
-#endif // GX_TOUCH_TEAMBAR
+	TouchRect btn;
+	if (touchSelectAllRect(btn) &&
+	    gameX >= btn.x && gameX < btn.x + btn.w &&
+	    gameY >= btn.y && gameY < btn.y + btn.h)
+		return 1;
+#endif
 	return -1;
 }
 
-void TouchTeamBar_Select(Int team)
+void TouchOverlay_SetThumb(Bool active, Int gameX, Int gameY)
 {
-#if GX_TOUCH_TEAMBAR
-	if (team < 0 || team > 9 || TheMessageStream == NULL)
-		return;
-	TheMessageStream->appendMessage((GameMessage::Type)(GameMessage::MSG_SELECT_TEAM0 + team));
+#if GX_TOUCH_OVERLAY
+	s_thumbActive = active;
+	s_thumbX = gameX;
+	s_thumbY = gameY;
 #endif
 }
 
-void TouchTeamBar_Assign(Int team)
+void TouchOverlay_SelectAll(void)
 {
-#if GX_TOUCH_TEAMBAR
-	if (team < 0 || team > 9 || TheMessageStream == NULL)
+#if GX_TOUCH_OVERLAY
+	if (TheMessageStream == NULL)
 		return;
-	TheMessageStream->appendMessage((GameMessage::Type)(GameMessage::MSG_CREATE_TEAM0 + team));
+	TheMessageStream->appendMessage(GameMessage::MSG_META_SELECT_ALL);
 #endif
 }

@@ -1,32 +1,31 @@
 /*
-**	Touch control overlays for the iOS port.
+**	Touch control overlay for the iOS port.
 **
-**	The team (control-group) bar: a row of numbered buttons drawn along the top
-**	of the screen so a keyboard-less device can create and recall hotkey squads.
-**	Tap a button to select that team; long-press to assign the current selection
-**	to it — the same MSG_SELECT_TEAMn / MSG_CREATE_TEAMn the number keys emit.
+**	Two on-screen affordances a keyboard-less device needs:
+**	  - a visible camera joystick pad (lower-left), and
+**	  - a "select all units on screen" button (top-left).
 **
-**	Drawing lives in InGameUI::postDraw (render pass); hit-testing is called from
-**	the SDL3 touch handler (input pass). Both share the geometry below. Every
-**	function is a no-op on non-touch builds, so desktop behaviour is unchanged.
+**	Geometry lives in TheDisplay's game-internal pixel space, so the overlay is
+**	drawn INSIDE the pillarbox/safe-area blit automatically (clear of the notch /
+**	Dynamic Island / rounded corners). The SDL3 touch handler converts each touch
+**	into that same game space before hit-testing, so what you see and what you
+**	press always line up. Everything no-ops on non-touch builds.
 */
 
 #pragma once
 
 #include "Lib/BaseType.h"
 
-/// Draw the team bar. Call once per frame from the in-game UI render pass.
-void TouchTeamBar_Draw(void);
+/// Draw the joystick pad and the select-all button. Call once per frame from the
+/// in-game UI render pass.
+void TouchOverlay_Draw(void);
 
-/// Return the team button (0..9) under a touch point given in NORMALIZED window
-/// coordinates (0..1, i.e. SDL's tfinger.x/y), or -1 if the point is not on the
-/// bar. Normalized input keeps the test resolution-independent: it is converted
-/// against the same TheDisplay basis the bar is drawn in, so window-vs-internal
-/// scaling never desyncs the buttons from the touches.
-Int TouchTeamBar_HitTest(Real normX, Real normY);
+/// Hit-test a point given in GAME-INTERNAL pixel coords.
+/// Returns 0 = joystick pad, 1 = select-all button, -1 = neither.
+Int TouchOverlay_HitTest(Int gameX, Int gameY);
 
-/// Recall a hotkey squad (as pressing the number key would).
-void TouchTeamBar_Select(Int team);
+/// Update the joystick thumb indicator (game-internal coords) for drawing.
+void TouchOverlay_SetThumb(Bool active, Int gameX, Int gameY);
 
-/// Assign the current selection to a hotkey squad (as CTRL+number would).
-void TouchTeamBar_Assign(Int team);
+/// Select every unit currently on screen (as the keyboard select-all would).
+void TouchOverlay_SelectAll(void);
