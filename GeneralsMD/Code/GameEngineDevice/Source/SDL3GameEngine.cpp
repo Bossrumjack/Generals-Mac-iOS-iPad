@@ -37,6 +37,7 @@
 #include "GameClient/GameWindow.h"
 #include "GameClient/GameWindowManager.h"
 #include "GameClient/Gadget.h"
+#include "GameClient/TouchControls.h"
 #include "W3DDevice/GameLogic/W3DGameLogic.h"
 #include "W3DDevice/GameClient/W3DGameClient.h"
 #include "W3DDevice/Common/W3DModuleFactory.h"
@@ -146,7 +147,8 @@ struct TouchState {
 		DRAGGING,    // finger1 drag in progress, LMB held
 		LONGPRESSED, // long-press fired (RMB click sent), swallow until lift
 		PAN,         // two-finger camera pan, RMB held
-		JOYSTICK     // single finger in the left scroll pad, RMB held (camera stick)
+		JOYSTICK,    // single finger in the left scroll pad, RMB held (camera stick)
+		TEAMBAR      // single finger held on a top team button (tap/long-press)
 	};
 
 	Phase phase = IDLE;
@@ -158,6 +160,7 @@ struct TouchState {
 	float pinchDist = 0.0f;             // finger distance at last wheel step
 	Uint64 downTicks = 0;
 	float f1x = 0.0f, f1y = 0.0f, f2x = 0.0f, f2y = 0.0f; // normalized per finger
+	int teamButton = -1;                // team bar button under finger1 (TEAMBAR)
 };
 
 TouchState s_touch;
@@ -233,6 +236,21 @@ void handleTouchEvent(SDL3Mouse *mouse, SDL_Window *window, const SDL_Event &eve
 
 	switch (event.type) {
 	case SDL_EVENT_FINGER_DOWN:
+		if (s_touch.phase == TouchState::IDLE) {
+			// Team (control-group) bar takes priority over everything else: a
+			// press on a top button never selects units or scrolls. Tap recalls
+			// the squad, long-press assigns the current selection (fired on lift).
+			const int teamBtn = TouchTeamBar_HitTest(event.tfinger.x, event.tfinger.y);
+			if (teamBtn >= 0) {
+				s_touch.finger1 = event.tfinger.fingerID;
+				s_touch.phase = TouchState::TEAMBAR;
+				s_touch.teamButton = teamBtn;
+				s_touch.downX = s_touch.lastX = px;
+				s_touch.downY = s_touch.lastY = py;
+				s_touch.downTicks = SDL_GetTicks();
+				break;
+			}
+		}
 		if (s_touch.phase == TouchState::IDLE &&
 		    event.tfinger.x < PAD_X_MAX &&
 		    event.tfinger.y > PAD_Y_MIN && event.tfinger.y < PAD_Y_MAX) {
@@ -328,6 +346,14 @@ void handleTouchEvent(SDL3Mouse *mouse, SDL_Window *window, const SDL_Event &eve
 			// engaged — only the initial landing has to be inside it.
 			sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_MOTION, px, py);
 		}
+		else if (s_touch.phase == TouchState::TEAMBAR && event.tfinger.fingerID == s_touch.finger1) {
+			// Sliding off the button cancels the press (no select/assign fires),
+			// so a stray touch that started on the bar can be dragged to nothing.
+			if (TouchTeamBar_HitTest(event.tfinger.x, event.tfinger.y) != s_touch.teamButton) {
+				s_touch.phase = TouchState::IDLE;
+				s_touch.teamButton = -1;
+			}
+		}
 		else if (s_touch.phase == TouchState::PAN) {
 			const float cx = (s_touch.f1x + s_touch.f2x) * 0.5f * (float)winW;
 			const float cy = (s_touch.f1y + s_touch.f2y) * 0.5f * (float)winH;
@@ -383,6 +409,18 @@ void handleTouchEvent(SDL3Mouse *mouse, SDL_Window *window, const SDL_Event &eve
 				// Release the held RMB; the engine stops scrolling next frame.
 				sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_UP,
 				                   px, py, SDL_BUTTON_RIGHT);
+				break;
+			case TouchState::TEAMBAR:
+				// Canceled touches never commit; a clean lift fires assign on a
+				// long hold, otherwise select — mirroring CTRL+num vs num.
+				if (event.type != SDL_EVENT_FINGER_CANCELED && s_touch.teamButton >= 0) {
+					if ((SDL_GetTicks() - s_touch.downTicks) >= LONG_PRESS_MS) {
+						TouchTeamBar_Assign(s_touch.teamButton);
+					} else {
+						TouchTeamBar_Select(s_touch.teamButton);
+					}
+				}
+				s_touch.teamButton = -1;
 				break;
 			default:
 				break;

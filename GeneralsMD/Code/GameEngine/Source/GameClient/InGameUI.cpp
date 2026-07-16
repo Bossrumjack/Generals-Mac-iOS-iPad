@@ -76,6 +76,10 @@
 #include "GameClient/SelectionXlat.h"
 #include "GameClient/Shadow.h"
 #include "GameClient/GlobalLanguage.h"
+#include "GameClient/TouchControls.h"
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 
 #include "GameLogic/AIGuard.h"
 #include "GameLogic/Weapon.h"
@@ -3791,6 +3795,8 @@ void InGameUI::postWindowDraw()
 //-------------------------------------------------------------------------------------------------
 void InGameUI::postDraw()
 {
+	// iOS touch team (control-group) bar, drawn on top of the UI. No-op elsewhere.
+	TouchTeamBar_Draw();
 
 	// render our display strings for the messages if on
 	if( m_messagesOn )
@@ -6362,4 +6368,167 @@ void InGameUI::drawPlayerInfoList()
 
 		drawY += lineH;
 	}
+}
+
+// ============================================================================
+// Touch team (control-group) bar — iOS
+//
+// A keyboard-less device cannot press CTRL+1 / 1 to manage hotkey squads, so we
+// draw a row of ten numbered buttons along the top-centre of the screen (clear
+// of the bottom-left radar, bottom command bar and top-right money/power HUD).
+// The SDL3 touch handler hit-tests presses here and calls Select (tap) or
+// Assign (long-press); both just inject the exact same GameMessages the number
+// keys would. All of this compiles to nothing on non-touch builds.
+// ============================================================================
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+#define GX_TOUCH_TEAMBAR 1
+#else
+#define GX_TOUCH_TEAMBAR 0
+#endif
+
+#if GX_TOUCH_TEAMBAR
+namespace {
+
+struct TouchTeamButton { Int x, y, w, h; };
+
+// Compute the ten button rects in TheDisplay pixel space. Draw and hit-test
+// share this one function so the visible buttons and the touch targets can
+// never drift apart. Returns the count (0 if no display yet).
+static Int computeTouchTeamButtons(TouchTeamButton out[10])
+{
+	if (TheDisplay == NULL)
+		return 0;
+
+	const Int sw = (Int)TheDisplay->getWidth();
+	const Int sh = (Int)TheDisplay->getHeight();
+	if (sw <= 0 || sh <= 0)
+		return 0;
+
+	Int bw = (Int)(sw * 0.045f);
+	if (bw < 24) bw = 24;
+	const Int gap = (Int)(bw * 0.20f);
+	const Int bh = (Int)(bw * 0.85f);
+	const Int total = 10 * bw + 9 * gap;
+	const Int startX = (sw - total) / 2;
+	const Int y = (Int)(sh * 0.015f) + 4;   // just below the top edge / notch margin
+
+	for (Int i = 0; i < 10; ++i)
+	{
+		out[i].x = startX + i * (bw + gap);
+		out[i].y = y;
+		out[i].w = bw;
+		out[i].h = bh;
+	}
+	return 10;
+}
+
+} // anonymous namespace
+#endif // GX_TOUCH_TEAMBAR
+
+void TouchTeamBar_Draw(void)
+{
+#if GX_TOUCH_TEAMBAR
+	if (TheDisplay == NULL || TheInGameUI == NULL)
+		return;
+	// Only while actually commanding units in-game (postDraw already gates this,
+	// but stay defensive: no bar in menus/score screens).
+	if (TheInGameUI->isQuitMenuVisible())
+		return;
+
+	TouchTeamButton btn[10];
+	const Int count = computeTouchTeamButtons(btn);
+	if (count == 0)
+		return;
+
+	// Cached digit strings + font, built once and reused each frame.
+	static DisplayString *s_digit[10] = { 0 };
+	static GameFont *s_font = NULL;
+	if (s_font == NULL && TheWindowManager != NULL)
+	{
+		AsciiString fontName = "Arial";
+		Int pointSize = 14;
+		Bool bold = TRUE;
+		if (TheGlobalLanguageData != NULL && TheGlobalLanguageData->m_messageFont.name.isNotEmpty())
+		{
+			fontName = TheGlobalLanguageData->m_messageFont.name;
+			pointSize = TheGlobalLanguageData->m_messageFont.size;
+			bold = TheGlobalLanguageData->m_messageFont.bold;
+		}
+		s_font = TheWindowManager->winFindFont(fontName, pointSize, bold);
+	}
+
+	const UnsignedInt bgColor     = GameMakeColor(0, 0, 0, 120);
+	const UnsignedInt borderColor = GameMakeColor(255, 255, 255, 170);
+	const UnsignedInt textColor   = GameMakeColor(255, 255, 0, 255);
+	const UnsignedInt dropColor   = GameMakeColor(0, 0, 0, 255);
+
+	for (Int i = 0; i < count; ++i)
+	{
+		TheDisplay->drawFillRect(btn[i].x, btn[i].y, btn[i].w, btn[i].h, bgColor);
+		TheDisplay->drawOpenRect(btn[i].x, btn[i].y, btn[i].w, btn[i].h, 1.0f, borderColor);
+
+		if (s_font != NULL && TheDisplayStringManager != NULL)
+		{
+			if (s_digit[i] == NULL)
+			{
+				s_digit[i] = TheDisplayStringManager->newDisplayString();
+				if (s_digit[i] != NULL)
+				{
+					UnicodeString label;
+					label.format(L"%d", i);
+					s_digit[i]->setFont(s_font);
+					s_digit[i]->setText(label);
+				}
+			}
+			if (s_digit[i] != NULL)
+			{
+				const Int tw = s_digit[i]->getWidth();
+				const Int th = s_font->height;
+				const Int tx = btn[i].x + (btn[i].w - tw) / 2;
+				const Int ty = btn[i].y + (btn[i].h - th) / 2;
+				s_digit[i]->draw(tx, ty, textColor, dropColor);
+			}
+		}
+	}
+#endif // GX_TOUCH_TEAMBAR
+}
+
+Int TouchTeamBar_HitTest(Real normX, Real normY)
+{
+#if GX_TOUCH_TEAMBAR
+	if (TheDisplay == NULL)
+		return -1;
+	const Int sw = (Int)TheDisplay->getWidth();
+	const Int sh = (Int)TheDisplay->getHeight();
+	const Int px = (Int)(normX * (Real)sw);
+	const Int py = (Int)(normY * (Real)sh);
+
+	TouchTeamButton btn[10];
+	const Int count = computeTouchTeamButtons(btn);
+	for (Int i = 0; i < count; ++i)
+	{
+		if (px >= btn[i].x && px < btn[i].x + btn[i].w &&
+		    py >= btn[i].y && py < btn[i].y + btn[i].h)
+			return i;
+	}
+#endif // GX_TOUCH_TEAMBAR
+	return -1;
+}
+
+void TouchTeamBar_Select(Int team)
+{
+#if GX_TOUCH_TEAMBAR
+	if (team < 0 || team > 9 || TheMessageStream == NULL)
+		return;
+	TheMessageStream->appendMessage((GameMessage::Type)(GameMessage::MSG_SELECT_TEAM0 + team));
+#endif
+}
+
+void TouchTeamBar_Assign(Int team)
+{
+#if GX_TOUCH_TEAMBAR
+	if (team < 0 || team > 9 || TheMessageStream == NULL)
+		return;
+	TheMessageStream->appendMessage((GameMessage::Type)(GameMessage::MSG_CREATE_TEAM0 + team));
+#endif
 }
