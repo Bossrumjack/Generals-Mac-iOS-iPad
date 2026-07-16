@@ -132,6 +132,10 @@ static bool SDLCALL iosLifecycleWatcher(void *userdata, SDL_Event *event)
 //   1 finger long-press   -> right button click (deselect), if finger stays put
 //   2 finger drag         -> right-button drag at the centroid (camera scroll)
 //   2 finger pinch        -> mouse wheel (camera zoom)
+//   1 finger in left pad  -> analog camera scroll stick (see PAD_* below): the
+//                            touch anchors an RMB scroll, so dragging away from
+//                            the landing point pans the map in that direction,
+//                            faster the farther the finger travels.
 // ---------------------------------------------------------------------------
 namespace {
 
@@ -141,7 +145,8 @@ struct TouchState {
 		PENDING,     // finger1 down, gesture identity not yet known, nothing sent
 		DRAGGING,    // finger1 drag in progress, LMB held
 		LONGPRESSED, // long-press fired (RMB click sent), swallow until lift
-		PAN          // two-finger camera pan, RMB held
+		PAN,         // two-finger camera pan, RMB held
+		JOYSTICK     // single finger in the left scroll pad, RMB held (camera stick)
 	};
 
 	Phase phase = IDLE;
@@ -160,6 +165,14 @@ TouchState s_touch;
 const Uint64 LONG_PRESS_MS = 600;
 const float PINCH_STEP_RATIO = 0.06f;  // 6% distance change per wheel tick
 const float TAP_DEAD_ZONE_PX = 8.0f;   // jitter below this keeps a tap a tap
+
+// Left-edge camera scroll pad, in normalized window coords (0..1). A single
+// finger that lands inside this zone becomes an analog camera stick instead of
+// a select/tap. Kept clear of the bottom-left radar (roughly y > 0.72) and the
+// very top edge so it never fights the HUD or the notch/status area.
+const float PAD_X_MAX = 0.16f;   // left 16% of the width
+const float PAD_Y_MIN = 0.12f;
+const float PAD_Y_MAX = 0.70f;
 
 void sendSyntheticMouse(SDL3Mouse *mouse, SDL_Window *window, Uint32 type,
                         float x, float y, Uint8 button = 0, float wheelY = 0.0f)
@@ -220,6 +233,25 @@ void handleTouchEvent(SDL3Mouse *mouse, SDL_Window *window, const SDL_Event &eve
 
 	switch (event.type) {
 	case SDL_EVENT_FINGER_DOWN:
+		if (s_touch.phase == TouchState::IDLE &&
+		    event.tfinger.x < PAD_X_MAX &&
+		    event.tfinger.y > PAD_Y_MIN && event.tfinger.y < PAD_Y_MAX) {
+			// Left scroll pad: drive the camera like an analog stick. Anchor an
+			// RMB scroll at the landing point; the engine's SCROLL_RMB then pans
+			// along the (finger - anchor) vector, scaled by its length, so the
+			// farther the finger drags from here the faster the map glides. All
+			// the stock scroll physics (speed factor, edge clamp) come for free.
+			s_touch.finger1 = event.tfinger.fingerID;
+			s_touch.phase = TouchState::JOYSTICK;
+			s_touch.downX = s_touch.lastX = px;
+			s_touch.downY = s_touch.lastY = py;
+			s_touch.f1x = event.tfinger.x;
+			s_touch.f1y = event.tfinger.y;
+			sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_MOTION, px, py);
+			sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_DOWN,
+			                   px, py, SDL_BUTTON_RIGHT);
+			break;
+		}
 		if (s_touch.phase == TouchState::IDLE) {
 			// Defer all BUTTON output: a finger landing could become a tap, a
 			// drag-box, a long-press, or the first finger of a camera pan. A
@@ -290,6 +322,12 @@ void handleTouchEvent(SDL3Mouse *mouse, SDL_Window *window, const SDL_Event &eve
 		else if (s_touch.phase == TouchState::DRAGGING && event.tfinger.fingerID == s_touch.finger1) {
 			sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_MOTION, px, py);
 		}
+		else if (s_touch.phase == TouchState::JOYSTICK && event.tfinger.fingerID == s_touch.finger1) {
+			// RMB is held; feeding the current finger position updates the scroll
+			// vector's magnitude/direction. The finger may leave the pad zone once
+			// engaged — only the initial landing has to be inside it.
+			sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_MOTION, px, py);
+		}
 		else if (s_touch.phase == TouchState::PAN) {
 			const float cx = (s_touch.f1x + s_touch.f2x) * 0.5f * (float)winW;
 			const float cy = (s_touch.f1y + s_touch.f2y) * 0.5f * (float)winH;
@@ -340,6 +378,11 @@ void handleTouchEvent(SDL3Mouse *mouse, SDL_Window *window, const SDL_Event &eve
 			case TouchState::PAN:
 				sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_UP,
 				                   s_touch.panX, s_touch.panY, SDL_BUTTON_RIGHT);
+				break;
+			case TouchState::JOYSTICK:
+				// Release the held RMB; the engine stops scrolling next frame.
+				sendSyntheticMouse(mouse, window, SDL_EVENT_MOUSE_BUTTON_UP,
+				                   px, py, SDL_BUTTON_RIGHT);
 				break;
 			default:
 				break;
